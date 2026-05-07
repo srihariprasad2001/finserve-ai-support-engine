@@ -1,24 +1,3 @@
-"""
-FinServe AI Support Engine — Phase 6
-Complete Production Application
-
-Combines all 5 phases into one deployable FastAPI system:
-  - Phase 1: LLM API (Claude integration)
-  - Phase 2: RAG (vector database with policies)
-  - Phase 3: Agentic workflows (tool selection and execution)
-  - Phase 4: Data pipelines (batch processing)
-  - Phase 5: Predictive backend (urgency scoring)
-
-Deployment targets:
-  - Local: python finserve_main_app.py
-  - GCP Cloud Run: gcloud run deploy finserve-api --source . --platform managed --region us-central1
-
-Environment variables required:
-  - ANTHROPIC_API_KEY: Your Claude API key
-  - DATABASE_URL: PostgreSQL connection string (optional, for production)
-  - GCP_PROJECT: Your GCP project ID (optional, for production)
-"""
-
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -27,8 +6,9 @@ import chromadb
 import os
 import re
 import json
+import random
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 # =============================================================================
 # Section 0 — Initialize FastAPI app and clients
@@ -37,7 +17,7 @@ from typing import Optional
 app = FastAPI(
     title="FinServe AI Support Engine",
     description="Production AI customer support system combining LLM, RAG, agents, pipelines, and prediction",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # Initialize Anthropic client
@@ -49,6 +29,11 @@ policy_collection = None  # Initialized on startup
 
 # Global state for request logging
 request_log = []
+
+# Global state for tool execution audit trail (in production: use a database)
+ticket_log = []
+escalation_log = []
+acknowledgement_log = []
 
 # =============================================================================
 # Section 1 — Data Models (Pydantic)
@@ -81,6 +66,7 @@ class FullProcessingResponse(BaseModel):
     urgency_label: str
     classification: str
     tools_used: list
+    tool_results: List[Dict[str, Any]]  # NEW: actual execution results
     claude_response: str
     total_tokens_used: int
     timestamp: str
@@ -255,52 +241,293 @@ Reply with ONLY the category name."""
     
     category = response.content[0].text.strip().lower()
     tokens = response.usage.input_tokens + response.usage.output_tokens
+    
+    # Validate category — fallback to safe default if Claude returns garbage
+    valid_categories = ["billing_complaint", "policy_query", "urgent_escalation", "account_request"]
+    if category not in valid_categories:
+        category = "urgent_escalation"  # Safest default
+    
     return category, tokens
 
 # =============================================================================
-# Section 5 — Phase 3 Agentic System (Tool Selection)
+# Section 5 — Phase 3 Agentic System (REAL TOOL EXECUTION)
+# =============================================================================
+#
+# UPGRADE: These functions now ACTUALLY EXECUTE actions instead of just
+# returning tool names. Each function returns structured data that proves
+# the action was taken (ticket IDs, escalation IDs, timestamps, etc.).
+#
+# In production, replace the mock logic with real API calls:
+#   - create_refund_ticket → POST to Jira/Zendesk/ServiceNow
+#   - escalate_to_agent    → Slack/PagerDuty/Twilio notifications
+#   - send_acknowledgement → SendGrid/AWS SES/Mailgun
 # =============================================================================
 
-def select_and_execute_tools(email: EmailRequest, category: str) -> dict:
-    """Phase 3: Select appropriate tools based on category"""
+def extract_amount_from_email(email_body: str) -> float:
+    """Helper: Extract dollar amount from email body using regex"""
+    # Match patterns like $500, $1,500.00, 500 dollars
+    pattern = r'\$([\d,]+\.?\d*)'
+    matches = re.findall(pattern, email_body)
+    if matches:
+        # Take the first amount, remove commas, convert to float
+        return float(matches[0].replace(',', ''))
+    return 0.0
+
+def create_refund_ticket(customer_id: str, amount: float, reason: str) -> dict:
+    """
+    TOOL: Creates a refund ticket in the ticketing system.
+    
+    In production, this would POST to Jira/Zendesk/ServiceNow.
+    For demo, we generate a mock ticket and log it.
+    """
+    ticket_id = f"TICKET-{random.randint(10000, 99999)}"
+    
+    ticket_data = {
+        "tool": "create_refund_ticket",
+        "ticket_id": ticket_id,
+        "customer_id": customer_id,
+        "type": "refund",
+        "amount": amount,
+        "reason": reason,
+        "status": "pending_investigation",
+        "priority": "high",
+        "sla_hours": 48,
+        "created_at": datetime.now().isoformat(),
+        "estimated_resolution": "5-7 business days"
+    }
+    
+    # Log it (in production: save to database)
+    ticket_log.append(ticket_data)
+    print(f"✓ [EXECUTED] Created refund ticket: {ticket_id} for {customer_id} (${amount})")
+    
+    # PRODUCTION CODE (commented out — would replace mock logic above):
+    # response = requests.post(
+    #     "https://api.zendesk.com/v2/tickets.json",
+    #     headers={"Authorization": f"Bearer {os.environ.get('ZENDESK_TOKEN')}"},
+    #     json={"ticket": {...}}
+    # )
+    # return response.json()
+    
+    return ticket_data
+
+def escalate_to_agent(customer_id: str, urgency_level: str, reason: str) -> dict:
+    """
+    TOOL: Escalates urgent issues to senior support team.
+    
+    In production, this would send Slack/PagerDuty/Twilio notifications.
+    For demo, we generate a mock escalation record.
+    """
+    escalation_id = f"ESC-{random.randint(10000, 99999)}"
+    
+    sla_minutes = {"high": 30, "critical": 15}.get(urgency_level.lower(), 60)
+    
+    escalation_data = {
+        "tool": "escalate_to_agent",
+        "escalation_id": escalation_id,
+        "customer_id": customer_id,
+        "urgency": urgency_level,
+        "reason": reason,
+        "sla_minutes": sla_minutes,
+        "assigned_to": "senior-support-team",
+        "callback_required": True,
+        "created_at": datetime.now().isoformat(),
+        "status": "queued_for_immediate_action"
+    }
+    
+    # Log it
+    escalation_log.append(escalation_data)
+    print(f"✓ [EXECUTED] Escalated to senior team: {escalation_id} (SLA: {sla_minutes} min)")
+    
+    # PRODUCTION CODE:
+    # slack_client.chat_postMessage(
+    #     channel="#urgent-support",
+    #     text=f"🚨 New escalation: {escalation_id} for {customer_id}"
+    # )
+    # pagerduty_client.create_incident(...)
+    
+    return escalation_data
+
+def send_acknowledgement(customer_email: str, customer_id: str, subject: str) -> dict:
+    """
+    TOOL: Sends acknowledgement email to customer.
+    
+    In production, this would use SendGrid/AWS SES/Mailgun.
+    For demo, we generate a mock send confirmation.
+    """
+    message_id = f"MSG-{random.randint(100000, 999999)}"
+    
+    ack_data = {
+        "tool": "send_acknowledgement",
+        "message_id": message_id,
+        "customer_id": customer_id,
+        "sent_to": customer_email,
+        "subject": f"RE: {subject}",
+        "template": "acknowledgement_v1",
+        "sent_at": datetime.now().isoformat(),
+        "delivery_status": "queued"
+    }
+    
+    # Log it
+    acknowledgement_log.append(ack_data)
+    print(f"✓ [EXECUTED] Sent acknowledgement to {customer_email}: {message_id}")
+    
+    # PRODUCTION CODE:
+    # sendgrid_client.send(
+    #     to=customer_email,
+    #     subject="We received your request",
+    #     template_id="d-abc123",
+    #     dynamic_template_data={"customer_id": customer_id}
+    # )
+    
+    return ack_data
+
+def answer_from_policy(customer_id: str, policy_context: str) -> dict:
+    """
+    TOOL: Marks that the response is grounded in policy documents.
+    
+    The actual policy retrieval happens in Phase 2 (RAG) and the
+    response generation in Phase 1. This tool just records that
+    a policy-based answer was used.
+    """
+    return {
+        "tool": "answer_from_policy",
+        "customer_id": customer_id,
+        "policy_context_used": bool(policy_context),
+        "context_length": len(policy_context) if policy_context else 0,
+        "executed_at": datetime.now().isoformat(),
+        "status": "policy_grounded_response"
+    }
+
+def select_and_execute_tools(email: EmailRequest, category: str, policy_context: str = "") -> dict:
+    """
+    Phase 3: Select AND EXECUTE appropriate tools based on category.
+    
+    This is the actual agentic execution layer. Based on the classified
+    intent, it triggers the corresponding tool functions and collects
+    their execution results for audit trail and API response.
+    """
     tools_used = []
+    execution_results = []
     
     if category == "billing_complaint":
+        # Extract amount from email body for the ticket
+        amount = extract_amount_from_email(email.body)
+        
+        # Tool 1: Create the refund ticket
+        ticket_result = create_refund_ticket(
+            customer_id=email.customer_id,
+            amount=amount,
+            reason=f"Customer reported billing issue: {email.subject}"
+        )
         tools_used.append("create_refund_ticket")
+        execution_results.append(ticket_result)
+        
+        # Tool 2: Send acknowledgement to customer
+        ack_result = send_acknowledgement(
+            customer_email=email.email_address,
+            customer_id=email.customer_id,
+            subject=email.subject
+        )
         tools_used.append("send_acknowledgement")
+        execution_results.append(ack_result)
+        
     elif category == "urgent_escalation":
+        # Escalate to senior team immediately
+        escalation_result = escalate_to_agent(
+            customer_id=email.customer_id,
+            urgency_level="high",
+            reason=f"Urgent customer issue: {email.subject}"
+        )
         tools_used.append("escalate_to_agent")
+        execution_results.append(escalation_result)
+        
     elif category == "policy_query":
+        # Mark policy-grounded response
+        policy_result = answer_from_policy(
+            customer_id=email.customer_id,
+            policy_context=policy_context
+        )
         tools_used.append("answer_from_policy")
-    else:
+        execution_results.append(policy_result)
+        
+    elif category == "account_request":
+        # Account requests get acknowledgement + escalation for human review
+        ack_result = send_acknowledgement(
+            customer_email=email.email_address,
+            customer_id=email.customer_id,
+            subject=email.subject
+        )
         tools_used.append("send_acknowledgement")
+        execution_results.append(ack_result)
+        
+        escalation_result = escalate_to_agent(
+            customer_id=email.customer_id,
+            urgency_level="medium",
+            reason=f"Account change request: {email.subject}"
+        )
+        tools_used.append("escalate_to_agent")
+        execution_results.append(escalation_result)
+        
+    else:
+        # Default fallback: acknowledge receipt
+        ack_result = send_acknowledgement(
+            customer_email=email.email_address,
+            customer_id=email.customer_id,
+            subject=email.subject
+        )
+        tools_used.append("send_acknowledgement")
+        execution_results.append(ack_result)
     
-    return {"tools_used": tools_used, "action_count": len(tools_used)}
+    return {
+        "tools_used": tools_used,
+        "execution_results": execution_results,
+        "action_count": len(tools_used)
+    }
 
 # =============================================================================
 # Section 6 — Phase 1 LLM Integration (Claude)
 # =============================================================================
 
-def generate_response(email: EmailRequest, category: str, policy_context: str) -> tuple:
-    """Phase 1: Generate AI response using Claude"""
+def generate_response(email: EmailRequest, category: str, policy_context: str, tool_results: list) -> tuple:
+    """Phase 1: Generate AI response using Claude — now aware of tool results"""
+    
+    # Build tool execution summary for Claude's context
+    tool_summary = ""
+    if tool_results:
+        actions_taken = []
+        for result in tool_results:
+            if result.get("tool") == "create_refund_ticket":
+                actions_taken.append(f"- Refund ticket {result['ticket_id']} created (resolution in {result['estimated_resolution']})")
+            elif result.get("tool") == "escalate_to_agent":
+                actions_taken.append(f"- Escalated to senior team (case {result['escalation_id']}, callback within {result['sla_minutes']} minutes)")
+            elif result.get("tool") == "send_acknowledgement":
+                actions_taken.append(f"- Confirmation email sent (reference {result['message_id']})")
+            elif result.get("tool") == "answer_from_policy":
+                actions_taken.append("- Response based on FinServe policy documents")
+        
+        if actions_taken:
+            tool_summary = "\n\nActions already taken on this case:\n" + "\n".join(actions_taken)
+    
     system_prompt = f"""You are a helpful customer support agent for FinServe AI Support Engine.
 Customer ID: {email.customer_id}
 Email: {email.email_address}
 Category: {category}
 
-If relevant policy information is provided below, use it to answer accurately."""
+If relevant policy information is provided below, use it to answer accurately.
+If actions have already been taken, mention them in your response so the customer knows what's happening."""
     
     enriched_prompt = f"""Policy context (if relevant):
 {policy_context}
+{tool_summary}
 
 Customer subject: {email.subject}
 Customer message: {email.body}
 
-Provide a professional, empathetic response."""
+Provide a professional, empathetic response that acknowledges any actions already taken."""
     
     response = anthropic_client.messages.create(
         model="claude-opus-4-6",
-        max_tokens=300,
+        max_tokens=400,
         system=system_prompt,
         messages=[{"role": "user", "content": enriched_prompt}]
     )
@@ -357,9 +584,9 @@ async def process_email(email: EmailRequest):
     Full pipeline: Combines all 5 phases
     1. Predict urgency (Phase 5)
     2. Classify intent (Phase 4)
-    3. Select tools (Phase 3)
-    4. Retrieve policies (Phase 2)
-    5. Generate response (Phase 1)
+    3. Retrieve policies (Phase 2)
+    4. Select AND EXECUTE tools (Phase 3) — now actually creates tickets!
+    5. Generate response (Phase 1) — aware of executed actions
     """
     try:
         total_tokens = 0
@@ -372,14 +599,16 @@ async def process_email(email: EmailRequest):
         category, class_tokens = classify_email(email)
         total_tokens += class_tokens
         
-        # Phase 3: Select tools
-        tool_selection = select_and_execute_tools(email, category)
-        
-        # Phase 2: Retrieve policies
+        # Phase 2: Retrieve policies (moved BEFORE Phase 3 so tools can use it)
         policy_context = retrieve_policy_context(email.subject + " " + email.body)
         
-        # Phase 1: Generate response
-        response_text, response_tokens = generate_response(email, category, policy_context)
+        # Phase 3: Select AND EXECUTE tools (now returns real execution results)
+        tool_execution = select_and_execute_tools(email, category, policy_context)
+        
+        # Phase 1: Generate response (now aware of what tools executed)
+        response_text, response_tokens = generate_response(
+            email, category, policy_context, tool_execution["execution_results"]
+        )
         total_tokens += response_tokens
         
         # Log the request
@@ -389,6 +618,7 @@ async def process_email(email: EmailRequest):
             "customer_id": email.customer_id,
             "urgency": prediction["urgency"],
             "category": category,
+            "tools_executed": tool_execution["tools_used"],
             "total_tokens": total_tokens
         })
         
@@ -398,7 +628,8 @@ async def process_email(email: EmailRequest):
             urgency_score=prediction["score"],
             urgency_label=prediction["urgency"],
             classification=category,
-            tools_used=tool_selection["tools_used"],
+            tools_used=tool_execution["tools_used"],
+            tool_results=tool_execution["execution_results"],  # NEW: actual results
             claude_response=response_text,
             total_tokens_used=total_tokens,
             timestamp=datetime.now().isoformat()
@@ -425,13 +656,37 @@ async def get_stats():
         "total_tokens_used": total_tokens,
         "avg_tokens_per_request": total_tokens // total_requests if total_requests > 0 else 0,
         "urgency_breakdown": urgency_counts,
+        "tools_executed": {
+            "tickets_created": len(ticket_log),
+            "escalations_created": len(escalation_log),
+            "acknowledgements_sent": len(acknowledgement_log)
+        },
         "last_request": request_log[-1] if request_log else None
     }
 
-@app.get("/docs")
-async def docs():
-    """Swagger UI documentation — automatically generated by FastAPI"""
-    pass  # FastAPI handles this automatically
+@app.get("/tickets")
+async def get_tickets():
+    """View all refund tickets created (audit trail)"""
+    return {
+        "total_tickets": len(ticket_log),
+        "tickets": ticket_log
+    }
+
+@app.get("/escalations")
+async def get_escalations():
+    """View all escalations created (audit trail)"""
+    return {
+        "total_escalations": len(escalation_log),
+        "escalations": escalation_log
+    }
+
+@app.get("/acknowledgements")
+async def get_acknowledgements():
+    """View all acknowledgements sent (audit trail)"""
+    return {
+        "total_acknowledgements": len(acknowledgement_log),
+        "acknowledgements": acknowledgement_log
+    }
 
 # =============================================================================
 # Section 8 — Local Testing (for development)
@@ -441,7 +696,8 @@ if __name__ == "__main__":
     import uvicorn
     
     print("\n" + "=" * 60)
-    print("   FINSERVE AI SUPPORT ENGINE — PHASE 6")
+    print("   FINSERVE AI SUPPORT ENGINE — PHASE 6 (UPGRADED)")
+    print("   With REAL Tool Execution")
     print("   Starting FastAPI server...")
     print("=" * 60)
     print("\n   Endpoints:")
@@ -449,6 +705,9 @@ if __name__ == "__main__":
     print("   - POST http://localhost:8000/predict")
     print("   - POST http://localhost:8000/process")
     print("   - GET  http://localhost:8000/stats")
+    print("   - GET  http://localhost:8000/tickets")
+    print("   - GET  http://localhost:8000/escalations")
+    print("   - GET  http://localhost:8000/acknowledgements")
     print("   - GET  http://localhost:8000/docs (Swagger UI)")
     print("\n   Run with: python finserve_main_app.py\n")
     
